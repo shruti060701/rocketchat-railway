@@ -19,7 +19,7 @@ Every message your team sends, every file shared, every customer conversation ro
 
 ## Why Deploy Rocket.Chat, the Slack Alternative, on Railway (Railway Free Trial)
 
-Slack's Pro plan runs $7.25 per user per month, and Rocket.Chat's own paid cloud tier runs $8 per user per month. A 20-person team on Slack Pro clears $145/month before any add-ons. Rocket.Chat's core is open-source with no per-seat fee at all, self-hosting it on Railway costs a flat infrastructure fee regardless of team size. Railway's $5 free trial covers your first month.
+Slack's Pro plan runs $7.25/user/month, and Rocket.Chat's own paid cloud tier runs $8/user/month. A 20-person team on Slack Pro clears $145/month before add-ons. Rocket.Chat's core is open-source with no per-seat fee, self-hosting it on Railway costs a flat fee regardless of team size. Railway's $5 trial covers your first month.
 
 ### Railway vs Other Hosting Providers and VPS for Rocket.Chat Self Hosting
 
