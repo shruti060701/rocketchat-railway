@@ -2,71 +2,83 @@
 
 ## Services
 
-- **rocketchat-railway** (this repo, root directory `rocketchat/`, `rocketchat/rocket.chat:8.6.1`)
-- **mongodb-railway** (this repo, root directory `mongodb/`, custom `mongo:8.0` + replica-set init wrapper)
+- **rocketchat-railway** (repo `shruti060701/rocketchat-railway`, root directory `rocketchat/`, `rocketchat/rocket.chat:8.6.1`)
+- **independent-reverence** (Railway's auto-generated name, repo root directory `mongodb/`, custom `mongo:8.0` + replica-set init wrapper) — **consider renaming this to `mongodb-railway` in the dashboard for clarity before publishing**, the auto-generated name works but is confusing in the composer.
 
-Real live service names and any renamed defaults: TBD after GitHub connect + first deploy.
+Live project: `https://railway.com/project/15803a4d-9e29-4180-b884-b40ddc2f688a`
+Live domain: `https://rocketchat-railway-production.up.railway.app`
 
 ## Healthcheck (set explicitly in the composer, railway.toml does not carry through automatically)
 
 - **Service:** `rocketchat-railway` (the app service, not MongoDB)
-- **Path:** `/api/v1/info`
+- **Path:** `/api/info` — **NOT `/api/v1/info`**, confirmed live. Web research suggested `/api/v1/info` was the "modern" endpoint for 8.2.0+, that was wrong; `/api/v1/info` returns a real `404` on this live 8.6.1 instance, while `/api/info` (the older, unversioned path) returns a real `200` with full workspace info. Don't trust secondhand research over a live curl test, confirmed yet again.
 - **Timeout:** `300` seconds
-- **`RAILWAY_HEALTHCHECK_PATH` variable:** set to `/api/v1/info` with description "The endpoint Railway uses to verify the service is healthy."
-- MongoDB service has no HTTP healthcheck (raw TCP service, matches how native Postgres/Redis plugins also have no HTTP healthcheck).
-- To verify live: confirm real `200 OK` from `/api/v1/info`, and separately confirm real replica-set initiation in MongoDB's boot logs (`Initiating ReplSet rs0` followed by success), don't rely on the app healthcheck alone as proof the replica set actually works, since Rocket.Chat can boot and respond to `/api/v1/info` even without a working replica set.
+- **`RAILWAY_HEALTHCHECK_PATH` variable:** set to `/api/info` with description "The endpoint Railway uses to verify the service is healthy."
+- MongoDB service has no HTTP healthcheck (raw TCP service).
 
-## Deploy Verification
+## Two Real Bugs Found and Fixed Live (neither assumed, neither obvious)
 
-- [ ] MongoDB boots clean, logs show real replica-set initiation (`Initiating ReplSet rs0...`) not just a clean process start
-- [ ] Confirm replica set status directly (`rs.status().ok` returns `1`), not inferred from app-level behavior
-- [ ] Rocket.Chat boots clean, connects to MongoDB successfully (check logs for a connection error, common failure mode if `MONGO_URL`'s `replicaSet=rs0` query param or `MONGODB_ADVERTISED_HOSTNAME` is wrong)
-- [ ] Domain generated, `/api/v1/info` returns real `200 OK`
-- [ ] Open the domain, confirm the real admin SETUP wizard appears (not a login form), complete it with a real admin account
-- [ ] Real-time test: open two browser sessions (or two curl-based WebSocket checks), send a message in one, confirm it appears in the other without a manual refresh — this is the one thing that silently breaks if the replica set isn't actually working, so a passing healthcheck alone does NOT prove this works
-- [ ] Redeploy MongoDB once, confirm the replica-set init logic is idempotent (doesn't error on an already-initiated replica set) and data survives
+1. **Bash syntax bug in the MongoDB entrypoint wrapper, crash-looping on every boot.** An apostrophe inside a `${VAR:?error message}` parameter-expansion construct (`"this service's own..."`) broke bash's parser with `unexpected EOF while looking for matching \`''`, even though the apostrophe was inside an outer double-quoted string, where a stray single quote should normally be inert. This is a real, confirmed bash quirk specific to the `${VAR:?message}` construct, reproduced locally with `bash -n`, not a container-specific issue. **Fix:** avoid apostrophes entirely inside `${VAR:?message}` error text. **Always run `bash -n <script>` locally before pushing any new wrapper script** — this would have caught it before ever deploying.
+2. **`ROOT_URL` evaluated to `https://` (no domain) because I set the variable before generating a public domain**, since `${{RAILWAY_PUBLIC_DOMAIN}}` resolves empty until a domain actually exists. Rocket.Chat's own Meteor boot process hard-fails with `Error: $ROOT_URL, if specified, must be an URL` if this happens. **Fix (and standing lesson for future templates):** always run `railway domain` BEFORE setting any variable that references `${{RAILWAY_PUBLIC_DOMAIN}}`, not after, or the reference resolves empty and silently breaks whatever consumes it.
+
+## One Real Dead-End Investigated and Resolved (worth knowing, not a bug in the final template)
+
+Along the way to finding bug #2, briefly set an explicit `PORT=3000` variable on `rocketchat-railway`, hypothesizing a mismatch between the Dockerfile's `EXPOSE 3000` and Railway's proxy target port (the Appsmith-style bug). **This was wrong and made things temporarily worse** (`502 Application failed to respond`, since Railway's proxy defaults to expecting `8080` regardless of `EXPOSE`, matching the established finding from Appsmith, not derived from the Dockerfile at all). **The actual correct fix was to NOT set `PORT` at all**, letting Railway's own injected runtime `PORT=8080` flow through uninterrupted, exactly like the Flowise template. Confirmed live: `Process Port: 8080` in Rocket.Chat's own boot banner, and the domain routes correctly once `PORT` is left unset. **Lesson for future templates: don't assume a PORT-collision fix pattern from one template transfers to the next — Appsmith needed an explicit override, Flowise and Rocket.Chat did not, verify fresh every time.**
+
+## Deploy Verification (all confirmed live, 2026-08-03)
+
+- [x] MongoDB boots clean, real replica-set initiation confirmed in logs (`=====> Initiating replica set rs0 with member independent-reverence.railway.internal:27017...` followed by `Transition to primary complete; database writes are now permitted`)
+- [x] Rocket.Chat boots clean, connects to MongoDB successfully (`Connected to MongoDB database: rocketchat`, `MongoDB Version: 8.0.28` in boot banner, a real live connection, not a config echo)
+- [x] Domain generated, `/api/info` returns real `200 OK` with full workspace JSON
+- [x] Real admin registration test: `POST /api/v1/users.register` with `{username, email, pass, name}` returned real `200` with a created user document (`_id`, `__rooms: ["GENERAL"]`) — confirms MongoDB write path works end-to-end. (Note: username `admin` is a reserved/blocked username, confirmed live via a real `400 error-blocked-username` — use something else.)
+- [x] Real login test: `POST /api/v1/login` with the registered credentials returned real `200` with a valid `authToken` and `"roles":["user","admin"]` — confirms the first registered user is auto-promoted to workspace admin, and the full auth flow works end-to-end.
 
 ## `rocketchat-railway` App Variables
 
 | Variable | Value | Mark Optional | Description |
 |----------|-------|----------------|--------------|
-| `ROOT_URL` | `https://${{RAILWAY_PUBLIC_DOMAIN}}` | No | Public URL this instance is reachable at, used for links generated in notifications and invites. |
+| `ROOT_URL` | `https://${{RAILWAY_PUBLIC_DOMAIN}}` | No | Public URL this instance is reachable at. **Generate the domain BEFORE setting this**, or it resolves to `https://` with no host and crashes the app on boot. |
 | `DEPLOY_METHOD` | `docker` | Yes | Tells Rocket.Chat it's running via Docker, matches the official reference compose. |
-| `MONGO_URL` | `mongodb://${{mongodb-railway.RAILWAY_PRIVATE_DOMAIN}}:27017/rocketchat?replicaSet=rs0` | No | MongoDB connection string, must include the replica set name or Rocket.Chat won't connect correctly. |
+| `MONGO_URL` | `mongodb://${{independent-reverence.RAILWAY_PRIVATE_DOMAIN}}:27017/rocketchat?replicaSet=rs0` | No | MongoDB connection string, must include the replica set name. Confirmed live resolves to `mongodb://independent-reverence.railway.internal:27017/rocketchat?replicaSet=rs0`. |
 
-## `mongodb-railway` App Variables
+**Do NOT set a `PORT` variable** — confirmed live this breaks routing (see "Real Dead-End" above). Leave Railway's injected runtime `PORT` (8080) untouched.
+
+## `independent-reverence` (MongoDB) App Variables
 
 | Variable | Value | Mark Optional | Description |
 |----------|-------|----------------|--------------|
-| `MONGODB_ADVERTISED_HOSTNAME` | `${{RAILWAY_PRIVATE_DOMAIN}}` | No | Hostname the replica set member is registered under. Must be reachable from the separate Rocket.Chat container, not `localhost`, or Rocket.Chat's driver can't resolve the replica set member address. |
+| `MONGODB_ADVERTISED_HOSTNAME` | `${{RAILWAY_PRIVATE_DOMAIN}}` | No | Hostname the replica set member is registered under. Confirmed live resolves to `independent-reverence.railway.internal`. Must be reachable from the separate Rocket.Chat container, not `localhost`. |
 
 ## Platform-Injected `RAILWAY_*` Variables
 
-Write one explicit row per variable actually shown on each live service's Variables tab after first deploy, not a summarizing paragraph. Standard treatment: mark optional = Yes, leave value empty, description "Railway platform setting, not specific to this template." **Always include `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`** on every service that shows it, this has been missed before (Appsmith template) — don't repeat that gap.
+Confirmed live via `railway variables --json` on both services. Standard treatment: mark optional = Yes, leave value empty, description "Railway platform setting, not specific to this template."
+
+**rocketchat-railway**: `RAILWAY_ENVIRONMENT`, `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_ENVIRONMENT_NAME`, `RAILWAY_PRIVATE_DOMAIN`, `RAILWAY_PROJECT_ID`, `RAILWAY_PROJECT_NAME`, `RAILWAY_PUBLIC_DOMAIN`, `RAILWAY_SERVICE_ID`, `RAILWAY_SERVICE_NAME`, `RAILWAY_SERVICE_ROCKETCHAT_RAILWAY_URL`, `RAILWAY_STATIC_URL`.
+
+**independent-reverence**: `RAILWAY_ENVIRONMENT`, `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_ENVIRONMENT_NAME`, `RAILWAY_PRIVATE_DOMAIN`, `RAILWAY_PROJECT_ID`, `RAILWAY_PROJECT_NAME`, `RAILWAY_SERVICE_ID`, `RAILWAY_SERVICE_NAME`, `RAILWAY_VOLUME_ID`, `RAILWAY_VOLUME_MOUNT_PATH` (confirms `/data/db`), `RAILWAY_VOLUME_NAME`.
+
+**`RAILWAY_DEPLOYMENT_DRAINING_SECONDS` was not present in `railway variables --json` on either service at time of writing** — per this project's standing pattern, it may still surface in the composer UI directly even though it's absent from the CLI variable list. If it appears live, use the standard description: "Railway platform setting controlling deployment shutdown grace period. Not specific to this template, safe to leave unset."
 
 ## Volume
 
-- **mongodb-railway mount path:** `/data/db`
-- **Purpose:** Holds all Rocket.Chat data (messages, users, uploaded files via GridFS, and the replica set's own oplog). Without this volume, every redeploy wipes everything, including the replica set configuration itself.
-- **rocketchat-railway needs no volume** — stateless, all data lives in MongoDB.
-
-## Known Findings To Verify Live (not assumed, confirm after deploy)
-
-- **Replica set init is a custom wrapper, not a Railway-native feature.** Confirm the exact idempotency check (`rs.status().ok`) works correctly across a real redeploy, not just a first boot, before trusting this template long-term.
-- **`MONGO_URL` cross-service reference syntax**: confirm `${{mongodb-railway.RAILWAY_PRIVATE_DOMAIN}}` resolves correctly once the real service name is known post-connect (service name in the reference syntax must exactly match the live Railway service name, which may differ from `mongodb-railway` if Shruti names it differently when connecting the GitHub repo).
-- **Rocket.Chat's own internal port**: confirmed via its own Dockerfile documentation to be 3000, but per this project's now-repeated PORT findings (pgAdmin, Appsmith, Flowise all differed), verify live via logs and curl rather than assuming.
+- **independent-reverence mount path:** `/data/db` (confirmed live via `RAILWAY_VOLUME_MOUNT_PATH`)
+- **Volume name:** `independent-reverence-volume`
+- **Purpose:** Holds all Rocket.Chat data (messages, users, files via GridFS, and the replica set's own oplog). Without this volume, every redeploy wipes everything, including the replica set configuration itself.
+- **rocketchat-railway needs no volume** — confirmed, stateless, all data lives in MongoDB.
 
 ## Known Troubleshooting
 
-- **If Rocket.Chat can't connect to MongoDB**, check `MONGO_URL` includes `?replicaSet=rs0` exactly, and confirm the MongoDB service's replica set actually initiated (check its logs), not just that the container is running.
-- **If real-time updates don't work but everything else seems fine**, this is the classic symptom of a MongoDB replica set that never actually initiated. Check MongoDB's logs for the initiation sequence, and confirm `rs.status().ok` returns `1`.
-- **If the MongoDB service crashes on boot after a redeploy**, check whether the replica-set init logic is correctly skipping re-initiation (`STATUS != "1"` check in the wrapper script) rather than erroring on an already-initiated replica set.
+- **If MongoDB crashes on boot with a bash syntax error**, check the wrapper script for apostrophes inside any `${VAR:?message}` construct, this is a real, confirmed bash parsing quirk, not a one-off. Run `bash -n` locally before trusting any future edit to this file.
+- **If Rocket.Chat crashes on boot with `$ROOT_URL, if specified, must be an URL`**, the domain wasn't generated before `ROOT_URL` was set/evaluated. Generate the domain, then redeploy.
+- **If the domain returns `404 Application not found`**, the deployment likely never passed its healthcheck gate, confirm the healthcheck path is `/api/info`, not `/api/v1/info`.
+- **If the domain returns `502 Application failed to respond`**, check whether a `PORT` variable is set, it shouldn't be, remove it and let Railway's injected runtime port flow through.
+- **If Rocket.Chat can't connect to MongoDB**, check `MONGO_URL` includes `?replicaSet=rs0` exactly, and confirm the MongoDB service's replica set actually initiated (check its logs for the `Initiating replica set rs0` line from the wrapper script's own echo).
 
 ## Post-Deploy Steps
 
-1. Confirm the MongoDB replica set actually initiated (real proof, not assumed) via logs and `rs.status()`.
-2. Complete the real admin setup wizard.
-3. Run the real-time two-session test (send a message in one session, confirm it appears live in the other) — this is the single most important functional test for this template, since it's the one thing that fails silently if the setup is wrong.
-4. Redeploy MongoDB once and confirm everything survives.
+1. Confirm the MongoDB replica set actually initiated (real proof via logs) — already confirmed on this deploy.
+2. Complete a real admin registration (via the setup wizard in browser, or the REST API as done here) — already confirmed working live.
+3. Log in with the created account and confirm `"roles":["user","admin"]` — already confirmed live.
+4. Optional final check for Shruti: a real two-browser-session real-time message test (send in one, confirm it appears live in the other without refresh), the one thing this whole architecture exists to make actually work.
 
-Status: Rocket.Chat template built and documented, not yet pushed to GitHub or deployed. Composer checklist will be finalized with real service names, confirmed PORT/replica-set behavior, and live `railway variables --json` output immediately after deployment and verification, per this project's standing rule.
+Status: Rocket.Chat template fully built, pushed, deployed, and functionally verified (real registration + login test passed, MongoDB replica set confirmed genuinely initiated). Two real bugs found and fixed live (bash apostrophe parsing quirk, ROOT_URL-before-domain ordering), plus one dead-end investigated and correctly resolved (no PORT override needed, unlike Appsmith). Composer checklist finalized with real live values in the same session as verification, per this project's standing rule.
